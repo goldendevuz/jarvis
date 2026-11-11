@@ -1,0 +1,62 @@
+# J.A.R.V.I.S. — always-on, lightweight, no paid services beyond Claude Code.
+#   cp .env.docker.example .env   # paste your Claude token (see the file)
+#   docker compose up -d --build
+# Then open http://localhost:5173 in Chrome and say "Hey Jarvis".
+services:
+  bridge:
+    build: { context: ., target: bridge }
+    restart: unless-stopped
+    init: true
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "127.0.0.1:8787:8787" # this machine only
+    environment:
+      JARVIS_BRIDGE_HOST: 0.0.0.0 # inside the container; published on loopback above
+      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:?run `claude setup-token` and put it in .env}
+      # Driving your own Chrome needs the Windows extension pipe, which a container
+      # cannot reach, so the tool is left out rather than promised and failed.
+      JARVIS_DISABLE: ${JARVIS_DISABLE:-browser}
+      JARVIS_MODEL: ${JARVIS_MODEL:-claude-opus-5}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-} # free voice (hearing + speaking) from aistudio.google.com/apikey
+      JARVIS_STT_LANGUAGE: ${JARVIS_STT_LANGUAGE:-Uzbek (Latin script, with oʻ and gʻ letters)}
+      # Host helper that opens/closes Windows apps (scripts/pc-helper.mjs).
+      JARVIS_PC_URL: ${JARVIS_PC_URL:-http://host.docker.internal:8788}
+      JARVIS_PC_SECRET: ${JARVIS_PC_SECRET:-}
+      JARVIS_TIMEZONE: ${JARVIS_TIMEZONE:-Asia/Tashkent}
+      JARVIS_LANGUAGE: ${JARVIS_LANGUAGE:-Uzbek (Latin script)}
+      JARVIS_EFFORT: ${JARVIS_EFFORT:-medium}
+      JARVIS_ALLOW_WRITES: ${JARVIS_ALLOW_WRITES:-0}
+      # No ElevenLabs key: voice and hearing use the browser's free speech.
+    volumes:
+      - jarvis-home:/home/node # workspace + agent state survive restarts
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:8787/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    mem_limit: 1g
+
+  web:
+    build:
+      context: .
+      target: web
+      args:
+        VITE_STT_LANG: ${JARVIS_STT_LANG:-uz-UZ}
+        VITE_TTS_LANG: ${JARVIS_STT_LANG:-uz-UZ}
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:5173:80"
+    depends_on: [bridge]
+    mem_limit: 64m
+
+volumes:
+  jarvis-home:
+
+# Fixed subnet: Docker's automatic pool runs dry on machines with many projects.
+# Change it only if it clashes with another network (`docker network ls`).
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 10.89.0.0/24
