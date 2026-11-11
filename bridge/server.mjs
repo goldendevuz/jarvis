@@ -15,6 +15,9 @@
  *   node bridge/server.mjs
  */
 
+import { geminiKey, transcribe as geminiTranscribe, speak as geminiSpeak } from './gemini.mjs'
+import { pcServer } from './pc.mjs'
+import { speakableUz } from './uztext.mjs'
 import { WebSocketServer } from 'ws'
 import { query } from '@anthropic-ai/claude-agent-sdk'
 import { displayServer } from './panels.mjs'
@@ -481,6 +484,30 @@ const PROMPT_TOOLS = `Using tools:
 - If a tool fails or isn't connected, one plain sentence saying so.
 - If you don't know, say you don't know.`
 
+// e.g. JARVIS_LANGUAGE="Uzbek (Latin script)". Everything is read aloud, so the
+// reply language has to be fixed here rather than left to follow the model's habit.
+const LANGUAGE = process.env.JARVIS_LANGUAGE?.trim()
+const PROMPT_LANGUAGE = LANGUAGE
+  ? `\n\nLANGUAGE. Always speak and write in ${LANGUAGE}, whatever language these instructions are in, unless the user asks for another. Panel text too. Keep the same terse register; "sir" becomes the natural polite address in that language. Write plain words a speech engine can read aloud.\n`
+  : ''
+
+// The agent has no clock (Bash is off and the container knows no time zone), so
+// every message carries the real time. JARVIS_TIMEZONE sets the zone.
+const TIMEZONE = process.env.JARVIS_TIMEZONE?.trim() || 'Asia/Tashkent'
+function clockStamp() {
+  try {
+    const now = new Date().toLocaleString('en-GB', {
+      timeZone: TIMEZONE,
+      weekday: 'long', day: 'numeric', month: 'long', year: 'numeric',
+      hour: '2-digit', minute: '2-digit', hour12: false,
+    })
+    return `[Now: ${now} (${TIMEZONE})]`
+  } catch {
+    return `[Now: ${new Date().toISOString()} (UTC)]`
+  }
+}
+const PROMPT_CLOCK = `\n\nTIME. Every user message begins with a line "[Now: …]" — the real current date and time. Use it for any question about the time, date, day or "how long until"; never say you have no way to tell the time. Do not read the line back unless asked.\n`
+
 const SYSTEM_PROMPT = [
   PROMPT_CORE,
   PROMPT_BLADES,
@@ -488,6 +515,8 @@ const SYSTEM_PROMPT = [
   DISABLED.has('browser') ? '' : PROMPT_BROWSER,
   DISABLED.has('camera') ? '' : PROMPT_EYES,
   PROMPT_TOOLS,
+  PROMPT_CLOCK,
+  PROMPT_LANGUAGE,
 ].join('')
 
 /**
@@ -742,7 +771,7 @@ const handleRequest = async (req, res) => {
     // student with nothing configured still has a working assistant.
     const eleven = Boolean(elevenKey())
     res.writeHead(200, { ...cors, 'content-type': 'application/json' })
-    return res.end(JSON.stringify({ ok: true, tts: eleven, stt: eleven }))
+    return res.end(JSON.stringify({ ok: true, tts: eleven || Boolean(geminiKey()), stt: eleven || Boolean(geminiKey()) }))
   }
 
   // Serve local image files to the page. Screenshots and generated art land on
@@ -866,9 +895,9 @@ const handleRequest = async (req, res) => {
 
   if (req.method === 'POST' && req.url === '/tts') {
     const key = elevenKey()
-    if (!key) {
+    if (!key && !geminiKey()) {
       res.writeHead(503, cors)
-      return res.end('no elevenlabs key')
+      return res.end('no voice key')
     }
     // A spoken line is a few hundred bytes. Anything approaching this is not a
     // sentence, and buffering it unbounded would let one request eat the heap.
@@ -898,6 +927,18 @@ const handleRequest = async (req, res) => {
     if (!text) {
       res.writeHead(400, cors)
       return res.end('no text')
+    }
+    if (!key) {
+      try {
+        const spoken = /uzbek/i.test(LANGUAGE ?? '') ? speakableUz(text) : text
+        const audio = await geminiSpeak(spoken)
+        res.writeHead(200, { ...cors, 'content-type': 'audio/wav' })
+        return res.end(audio)
+      } catch (err) {
+        console.warn(`[jarvis] speaking failed: ${err.message}`)
+        res.writeHead(502, cors)
+        return res.end('speech failed')
+      }
     }
     try {
       const upstream = await fetch(
@@ -951,7 +992,7 @@ const handleRequest = async (req, res) => {
   // touches this endpoint; this is only for the words.
   if (req.method === 'POST' && req.url === '/stt') {
     const key = elevenKey()
-    if (!key) {
+    if (!key && !geminiKey()) {
       res.writeHead(503, cors)
       return res.end('no elevenlabs key')
     }
@@ -982,6 +1023,22 @@ const handleRequest = async (req, res) => {
       return res.end(JSON.stringify({ text: '' }))
     }
 
+    if (!key) {
+      try {
+        const text = await geminiTranscribe(
+          Buffer.concat(chunks),
+          type.split(';')[0],
+          process.env.JARVIS_STT_LANGUAGE?.trim() || LANGUAGE || 'English',
+          process.env.JARVIS_STT_VOCAB?.trim() || 'ochiq, yop, qidir, ob-havo, rasm, ekran',
+        )
+        res.writeHead(200, { ...cors, 'content-type': 'application/json' })
+        return res.end(JSON.stringify({ text }))
+      } catch (err) {
+        console.warn(`[jarvis] hearing failed: ${err.message}`)
+        res.writeHead(502, cors)
+        return res.end('transcription failed')
+      }
+    }
     try {
       // The filename extension is the only hint Scribe gets about the codec, so
       // derive it from the content-type the MediaRecorder reported rather than
@@ -1150,7 +1207,7 @@ wss.on('connection', (socket) => {
       if (closed || text == null) return
       yield {
         type: 'user',
-        message: { role: 'user', content: text },
+        message: { role: 'user', content: `${clockStamp()}\n${text}` },
         parent_tool_use_id: null,
       }
     }
@@ -1318,6 +1375,9 @@ wss.on('connection', (socket) => {
           : { jarvis_chrome: chromeServer({ allowWrites: ALLOW_WRITES }) }),
         // The camera, which unlike everything else here has to ask and wait.
         ...(DISABLED.has('camera') ? {} : { jarvis_eyes: visionServer(ask) }),
+        ...(process.env.JARVIS_PC_URL && process.env.JARVIS_PC_SECRET && !DISABLED.has('pc')
+          ? { jarvis_pc: pcServer(process.env.JARVIS_PC_URL, process.env.JARVIS_PC_SECRET) }
+          : {}),
       },
       // A plain system prompt, not the claude_code preset. The preset is
       // tuned for a coding agent — verbose, file-oriented, and a large chunk

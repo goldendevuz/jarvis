@@ -204,12 +204,29 @@ function score(v: SpeechSynthesisVoice): number {
   return s
 }
 
+/** Spoken language, e.g. `uz-UZ`. Unset keeps the English butler voices. */
+const TTS_LANG: string = (import.meta.env.VITE_TTS_LANG as string | undefined)?.trim() ?? ''
+
+/** Voices in the configured language, best-sounding (natural/online) first. */
+function langVoices(): SpeechSynthesisVoice[] {
+  const base = TTS_LANG.toLowerCase().split('-')[0]
+  // A clear female voice is wanted: Madina (Edge's Uzbek neural voice) first,
+  // then any other female-sounding name, then the rest.
+  const rank = (v: SpeechSynthesisVoice) =>
+    /madina|nigora|female|ayol/i.test(v.name) ? 3 : /natural|online/i.test(v.name) ? 2 : v.lang.toLowerCase() === TTS_LANG.toLowerCase() ? 1 : 0
+  return speechSynthesis
+    .getVoices()
+    .filter((v) => v.lang.toLowerCase().replace('_', '-').startsWith(base))
+    .sort((a, b) => rank(b) - rank(a))
+}
+
 /** Only voices that scored on a name match, not merely on being English —
  *  otherwise the picker cycles through a dozen US novelty voices. */
 const USABLE = 40
 
 /** Best-first list of usable voices — also what the voice picker cycles. */
 export function candidateVoices(): SpeechSynthesisVoice[] {
+  if (TTS_LANG) return langVoices()
   return speechSynthesis
     .getVoices()
     .filter((v) => /^en/i.test(v.lang))
@@ -477,7 +494,7 @@ export function createSpeaker(): Speaker {
       const u = new SpeechSynthesisUtterance(text)
       const voice = pickVoice()
       if (voice) u.voice = voice
-      u.lang = voice?.lang ?? 'en-GB'
+      u.lang = voice?.lang ?? (TTS_LANG || 'en-GB')
       // Deliberate, and deliberately invariant — the character's pace does not
       // change with stakes, and that steadiness is most of the effect. This
       // lands around 130 wpm, below the median for film dialogue.
@@ -485,7 +502,7 @@ export function createSpeaker(): Speaker {
       // Mid-baritone, and *not* pushed lower for gravitas. The voice is
       // clarity-weighted rather than chest-weighted; dropping it further reads
       // as a film-trailer voiceover, which is the wrong character entirely.
-      u.pitch = 0.95
+      u.pitch = TTS_LANG ? 1 : 0.95
 
       // speechSynthesis exposes no amplitude, so drive the reactor from a
       // synthetic envelope. It only has to look like speech, not match it.

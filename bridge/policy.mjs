@@ -153,6 +153,10 @@ export function decideTool(name, allowWrites = false) {
     // indicator the user can see for as long as it is live.
     if (server === 'jarvis_eyes') return true
 
+    // Open/close apps through the host helper, which allowlists apps and
+    // exposes no shell. Only built when JARVIS_PC_URL is set.
+    if (server === 'jarvis_pc') return true
+
     const tool = mcpToolOf(name)
     if (EFFECTFUL_VERB.test(tool) && !VETO_EXEMPT.has(`${server}__${tool}`)) {
       return allowWrites

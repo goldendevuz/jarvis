@@ -197,8 +197,11 @@ export function Scene() {
     <Canvas
       className="scene"
       camera={{ position: [0, 0, 6.2], fov: 45 }}
-      gl={{ antialias: true, alpha: true }}
-      dpr={[1, 2]}
+      // Low-power GPU and 1x pixel density: on a high-DPI laptop screen the 2x
+      // default draws four times the pixels (plus bloom) every frame, which is
+      // what spins the fans up. Still sharp enough for a glowing hologram.
+      gl={{ antialias: false, alpha: true, powerPreference: 'low-power' }}
+      dpr={1}
     >
       <Rig />
       {/*
